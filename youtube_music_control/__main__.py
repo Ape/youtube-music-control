@@ -9,34 +9,39 @@ class API:
         self.server = server.rstrip("/")
         self.api = api.rstrip("/")
 
-    def authenticate(self, username):
-        auth_url = f"{self.server}/auth/{username}"
-        response = requests.post(auth_url)
+    def authenticate(self, username, verbose=False):
+        url = f"{self.server}/auth/{username}"
+        response = requests.post(url)
 
         if response.status_code != 200:
             print(f"Request failed: {response.status_code} {response.reason}")
-            print(auth_url)
+            print(url)
             return None
+
+        if verbose:
+            print(f"POST {url} {response.status_code}")
 
         return response.json().get("accessToken")
 
-    def fetch_api_doc(self, verbose=False):
-        doc_url = f"{self.server}/doc"
-        response = requests.get(doc_url)
+    def fetch_api_doc(self, verbose=False, print_data=False):
+        url = f"{self.server}/doc"
+        response = requests.get(url)
+
+        if response.status_code != 200:
+            print(f"Request failed: {response.status_code} {response.reason}")
+            print(url)
+            return {}
 
         if verbose:
-            print(f"GET {doc_url} {response.status_code}")
+            print(f"GET {url} {response.status_code}")
+
+        if print_data:
             if response.status_code == 200 and response.text.strip():
                 try:
                     data = response.json()
                     print(json.dumps(data, indent=2))
                 except Exception:
                     print(response.text)
-
-        if response.status_code != 200:
-            print(f"Request failed: {response.status_code} {response.reason}")
-            print(doc_url)
-            return {}
 
         api_doc = response.json()
         endpoints = {}
@@ -251,7 +256,7 @@ def main():
     api = API(args.server, args.api)
 
     if args.list:
-        endpoints = api.fetch_api_doc(args.verbose)
+        endpoints = api.fetch_api_doc(args.verbose, print_data=args.verbose)
         display_endpoints(endpoints)
         return
 
@@ -259,11 +264,11 @@ def main():
         parser.print_help()
         return
 
-    endpoints = api.fetch_api_doc(verbose=False)
+    endpoints = api.fetch_api_doc(args.verbose, print_data=False)
     http_method = determine_http_method(args, endpoints)
     post_data = process_post_data(http_method, args, endpoints)
 
-    token = api.authenticate(args.user)
+    token = api.authenticate(args.user, args.verbose)
 
     if token:
         api.make_request(
