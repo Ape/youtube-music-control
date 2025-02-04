@@ -8,7 +8,8 @@ import requests
 class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter):
     def _get_help_string(self, action):
         # Do not show default values for these arguments
-        if action.dest in ["endpoint", "data", "list", "verbose"]:
+        if action.dest in ["endpoint", "data", "patch", "delete", "list",
+                           "verbose"]:
             return action.help
 
         return super()._get_help_string(action)
@@ -73,8 +74,8 @@ class API:
                 data = None
                 schema = None
 
-                if method_upper == "POST" and "requestBody" in details:
-                    req_body = details.get("requestBody", {})
+                if method_upper in {"POST", "PATCH"} and "requestBody" in details:
+                    req_body = details["requestBody"]
                     data = req_body.get("description", "no description")
                     content = req_body.get("content", {})
 
@@ -95,7 +96,7 @@ class API:
         headers = {"Authorization": f"Bearer {token}"}
 
         if verbose:
-            if http_method == "POST" and post_data is not None:
+            if http_method in ("POST", "PATCH") and post_data is not None:
                 try:
                     print(json.dumps(post_data, indent=2))
                 except Exception:
@@ -148,6 +149,10 @@ def main():
                         help="API path")
     parser.add_argument("--user", "-u", default="youtube-music-control",
                         help="Username for authentication")
+    parser.add_argument("--patch", action="store_true",
+                        help="Use PATCH method")
+    parser.add_argument("--delete", action="store_true",
+                        help="Use DELETE method")
     parser.add_argument("--list", "-l", action="store_true",
                         help="List available API endpoints")
     parser.add_argument("--verbose", "-v", action="store_true",
@@ -155,9 +160,13 @@ def main():
     parser.add_argument("endpoint", nargs="?",
                         help="API endpoint to call")
     parser.add_argument("data", nargs="?",
-                        help="Data for POST requests: JSON or a single value")
+                        help="Request data: JSON or a single value")
 
     args = parser.parse_args()
+
+    if args.delete and args.patch:
+        parser.error("Cannot specify both --delete and --patch options simultaneously.")
+
     api = API(args.server, args.api)
 
     if args.list:
@@ -181,7 +190,7 @@ def main():
                 else:
                     lines += f"\n    {method}: {description}"
 
-                if method == "POST" and data:
+                if method in ("POST", "PATCH") and data:
                     lines += f" (data: {data})"
 
             print(lines)
@@ -194,7 +203,11 @@ def main():
 
     endpoints = api.fetch_api_doc(verbose=False)
 
-    if args.data is not None:
+    if args.delete:
+        http_method = "DELETE"
+    elif args.patch:
+        http_method = "PATCH"
+    elif args.data is not None:
         http_method = "POST"
     else:
         if args.endpoint in endpoints:
@@ -204,21 +217,23 @@ def main():
             else:
                 http_method = list(methods.keys())[0]
         else:
-            http_method = "POST" if args.data is not None else "GET"
+            http_method = "GET"
 
     post_data = None
-
-    if http_method == "POST" and args.data is not None:
+    # Process request data if needed (for POST and PATCH)
+    if http_method in ("POST", "PATCH") and args.data is not None:
         try:
             loaded = json.loads(args.data)
         except json.JSONDecodeError:
             loaded = args.data
 
         if not isinstance(loaded, dict):
-            try:
-                schema = endpoints[args.endpoint]["POST"].get("schema")
-            except KeyError:
-                print(f"No POST data schema for {args.endpoint}")
+            # Attempt to use the API doc schema to map the data to an object
+            endpoint = endpoints.get(args.endpoint, {})
+            schema = endpoint.get(http_method, {}).get("schema")
+
+            if schema is None:
+                print(f"No {http_method} data schema for {args.endpoint}")
                 return
 
             if schema and schema.get("type") == "object":
