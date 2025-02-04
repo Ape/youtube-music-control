@@ -5,16 +5,6 @@ import json
 import requests
 
 
-class CustomFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    def _get_help_string(self, action):
-        # Do not show default values for these arguments
-        if action.dest in ["endpoint", "data", "patch", "delete", "list",
-                           "verbose"]:
-            return action.help
-
-        return super()._get_help_string(action)
-
-
 class API:
     def __init__(self, server, api):
         self.server = server.rstrip("/")
@@ -50,8 +40,8 @@ class API:
             return {}
 
         api_doc = response.json()
-        paths = api_doc.get("paths", {})
         endpoints = {}
+        paths = api_doc.get("paths", {})
 
         for path, methods in paths.items():
             if not path.startswith(self.api):
@@ -60,21 +50,18 @@ class API:
             if path.endswith("-info"):
                 continue
 
-            endpoint = path[len(self.api):]
-
-            if endpoint.startswith("/"):
-                endpoint = endpoint[1:]
+            endpoint = path[len(self.api):].lstrip("/")
 
             if endpoint not in endpoints:
                 endpoints[endpoint] = {}
 
             for method, details in methods.items():
-                method_upper = method.upper()
+                method = method.upper()
                 description = details.get("description", endpoint)
                 data = None
                 schema = None
 
-                if method_upper in {"POST", "PATCH"} and "requestBody" in details:
+                if method in {"POST", "PATCH"} and "requestBody" in details:
                     req_body = details["requestBody"]
                     data = req_body.get("description", "no description")
                     content = req_body.get("content", {})
@@ -82,7 +69,7 @@ class API:
                     if "application/json" in content:
                         schema = content["application/json"].get("schema", {})
 
-                endpoints[endpoint][method_upper] = {
+                endpoints[endpoint][method] = {
                     "description": description,
                     "data": data,
                     "schema": schema,
@@ -115,6 +102,7 @@ class API:
             return
 
         parsed_data = None
+
         if response.text.strip():
             try:
                 parsed_data = response.json()
@@ -124,31 +112,25 @@ class API:
         if verbose:
             print(f"{http_method} {url} {response.status_code}")
 
-            if parsed_data:
-                if isinstance(parsed_data, dict):
-                    print(json.dumps(parsed_data, indent=2))
-                else:
-                    print(parsed_data)
-        else:
-            if response.status_code == 200 and parsed_data:
-                if isinstance(parsed_data, dict):
-                    print(json.dumps(parsed_data, indent=2))
-                else:
-                    print(parsed_data)
+        if parsed_data:
+            if isinstance(parsed_data, dict):
+                print(json.dumps(parsed_data, indent=2))
+            else:
+                print(parsed_data)
 
 
-def main():
+def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Remote control client for th-ch/youtube-music",
-        formatter_class=CustomFormatter
     )
 
     parser.add_argument("--server", "-s", default="http://localhost:26538",
-                        help="Server base URL")
+                        help="Server base URL (default: %(default)s)")
     parser.add_argument("--api", default="/api/v1",
-                        help="API path")
+                        help="API path (default: %(default)s)")
     parser.add_argument("--user", "-u", default="youtube-music-control",
-                        help="Username for authentication")
+                        help="Username for authentication"
+                             " (default: %(default)s)")
     parser.add_argument("--patch", action="store_true",
                         help="Use PATCH method")
     parser.add_argument("--delete", action="store_true",
@@ -165,36 +147,113 @@ def main():
     args = parser.parse_args()
 
     if args.delete and args.patch:
-        parser.error("Cannot specify both --delete and --patch options simultaneously.")
+        parser.error(
+            "Cannot specify both --delete and --patch options simultaneously."
+        )
 
+    return parser, args
+
+
+def display_endpoints(endpoints):
+    if not endpoints:
+        print("No endpoints found!")
+        return
+
+    print("Available API endpoints:")
+    for endpoint, methods in endpoints.items():
+        line = f"  {endpoint}"
+
+        for method, details in methods.items():
+            description = details.get("description")
+            data_info = details.get("data")
+
+            if len(methods) == 1:
+                line += f": {description}"
+            else:
+                line += f"\n    {method}: {description}"
+
+            if method in ("POST", "PATCH") and data_info:
+                line += f" (data: {data_info})"
+
+        print(line)
+
+
+def determine_http_method(args, endpoints):
+    if args.delete:
+        return "DELETE"
+
+    if args.patch:
+        return "PATCH"
+
+    if args.data is not None:
+        return "POST"
+
+    if args.endpoint not in endpoints:
+        return "GET"
+
+    methods = endpoints[args.endpoint]
+
+    if "GET" in methods:
+        return "GET"
+
+    return list(methods.keys())[0]
+
+
+def process_post_data(http_method, args, endpoints):
+    if http_method not in ("POST", "PATCH"):
+        return None
+
+    if args.data is None:
+        return None
+
+    try:
+        loaded = json.loads(args.data)
+    except json.JSONDecodeError:
+        loaded = args.data
+
+    if isinstance(loaded, dict):
+        return loaded
+
+    endpoint_doc = endpoints.get(args.endpoint, {})
+    schema = endpoint_doc.get(http_method, {}).get("schema")
+
+    if schema is None:
+        print(f"No {http_method} data schema for {args.endpoint}")
+        return None
+
+    if schema.get("type") != "object":
+        return loaded
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    if len(required) != 1:
+        print(f"{args.endpoint} {http_method} requires an object")
+        return None
+
+    key = required[0]
+
+    if properties.get(key, {}).get("type") == "number":
+        try:
+            value = float(loaded)
+
+            if value.is_integer():
+                value = int(value)
+
+            loaded = value
+        except Exception:
+            pass
+
+    return {key: loaded}
+
+
+def main():
+    parser, args = parse_arguments()
     api = API(args.server, args.api)
 
     if args.list:
-        endpoints = api.fetch_api_doc(verbose=args.verbose)
-
-        if not endpoints:
-            print("No endpoints found!")
-            return
-
-        print("Available API endpoints:")
-
-        for ep, methods in endpoints.items():
-            lines = f"  {ep}"
-
-            for method, details in methods.items():
-                description = details.get("description")
-                data = details.get("data")
-
-                if len(methods) == 1:
-                    lines += f": {description}"
-                else:
-                    lines += f"\n    {method}: {description}"
-
-                if method in ("POST", "PATCH") and data:
-                    lines += f" (data: {data})"
-
-            print(lines)
-
+        endpoints = api.fetch_api_doc(args.verbose)
+        display_endpoints(endpoints)
         return
 
     if not args.endpoint:
@@ -202,61 +261,8 @@ def main():
         return
 
     endpoints = api.fetch_api_doc(verbose=False)
-
-    if args.delete:
-        http_method = "DELETE"
-    elif args.patch:
-        http_method = "PATCH"
-    elif args.data is not None:
-        http_method = "POST"
-    else:
-        if args.endpoint in endpoints:
-            methods = endpoints[args.endpoint]
-            if "GET" in methods:
-                http_method = "GET"
-            else:
-                http_method = list(methods.keys())[0]
-        else:
-            http_method = "GET"
-
-    post_data = None
-    # Process request data if needed (for POST and PATCH)
-    if http_method in ("POST", "PATCH") and args.data is not None:
-        try:
-            loaded = json.loads(args.data)
-        except json.JSONDecodeError:
-            loaded = args.data
-
-        if not isinstance(loaded, dict):
-            # Attempt to use the API doc schema to map the data to an object
-            endpoint = endpoints.get(args.endpoint, {})
-            schema = endpoint.get(http_method, {}).get("schema")
-
-            if schema is None:
-                print(f"No {http_method} data schema for {args.endpoint}")
-                return
-
-            if schema and schema.get("type") == "object":
-                properties = schema.get("properties", {})
-                required = schema.get("required", [])
-
-                if len(required) == 1:
-                    key = required[0]
-
-                    if properties[key]["type"] == "number":
-                        try:
-                            value = float(loaded)
-
-                            if value.is_integer():
-                                value = int(value)
-
-                            loaded = value
-                        except Exception:
-                            pass
-
-                    loaded = {key: loaded}
-
-        post_data = loaded
+    http_method = determine_http_method(args, endpoints)
+    post_data = process_post_data(http_method, args, endpoints)
 
     token = api.authenticate(args.user)
 
